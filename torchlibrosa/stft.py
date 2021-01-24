@@ -1,3 +1,4 @@
+import argparse
 import math
 
 import librosa
@@ -5,7 +6,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from librosa import ParameterError
 from torch.nn.parameter import Parameter
 
 eps = torch.finfo(torch.float32).eps
@@ -83,8 +83,8 @@ class DFT(DFTBase):
         if self.norm is None:
             z_real /= self.n
         elif self.norm == 'ortho':
-            z_real /= math.sqrt(n)
-            z_imag /= math.sqrt(n)
+            z_real /= math.sqrt(self.n)
+            z_imag /= math.sqrt(self.n)
 
         return z_real, z_imag
 
@@ -280,7 +280,7 @@ class ISTFT(DFTBase):
 
         if freeze_parameters:
             for param in self.parameters():
-                param.requires_grad = False        
+                param.requires_grad = False
 
     def init_weights(self):
         ifft_window = librosa.filters.get_window(self.window, self.win_length, fftbins=True)
@@ -424,7 +424,7 @@ class Spectrogram(nn.Module):
 
 
 class LogmelFilterBank(nn.Module):
-    def __init__(self, sr=32000, n_fft=2048, n_mels=64, fmin=50, fmax=14000, is_log=True, 
+    def __init__(self, sr=22050, n_fft=2048, n_mels=64, fmin=0.0, fmax=None, is_log=True, 
         ref=1.0, amin=1e-10, top_db=80.0, freeze_parameters=True):
         """Calculate logmel spectrogram using pytorch. The mel filter bank is 
         the pytorch implementation of as librosa.filters.mel 
@@ -435,6 +435,8 @@ class LogmelFilterBank(nn.Module):
         self.ref = ref
         self.amin = amin
         self.top_db = top_db
+        if fmax == None:
+            fmax = sr // 2
 
         self.melW = librosa.filters.mel(sr=sr, n_fft=n_fft, n_mels=n_mels,
             fmin=fmin, fmax=fmax).T
@@ -472,7 +474,7 @@ class LogmelFilterBank(nn.Module):
 
         if self.top_db is not None:
             if self.top_db < 0:
-                raise ParameterError('top_db must be non-negative')
+                raise librosa.util.exceptions.ParameterError('top_db must be non-negative')
             log_spec = torch.clamp(log_spec, min=log_spec.max().item() - self.top_db, max=np.inf)
 
         return log_spec
@@ -675,7 +677,7 @@ class Enframe(nn.Module):
 
         if self.top_db is not None:
             if self.top_db < 0:
-                raise ParameterError('top_db must be non-negative')
+                raise librosa.util.exceptions.ParameterError('top_db must be non-negative')
             log_spec = torch.clamp(log_spec, min=log_spec.max() - self.top_db, max=np.inf)
 
         return log_spec
@@ -739,17 +741,16 @@ def debug(select, device):
         print(np.max(np.abs(np_data - pt_irdft.cpu().numpy())))
         
     elif select == 'stft':
-        data_length = 32000
         device = torch.device(device)
         np.random.seed(0)
 
-        sample_rate = 16000
-        n_fft = 1024
-        hop_length = 250
-        win_length = 1024
+        sample_rate = 22050
+        data_length = sample_rate * 1
+        n_fft = 2048
+        hop_length = 512
+        win_length = 2048
         window = 'hann'
         center = True
-        dtype = np.complex64
         pad_mode = 'reflect'
 
         # Data
@@ -769,7 +770,7 @@ def debug(select, device):
 
         (pt_stft_real, pt_stft_imag) = pt_stft_extractor.forward(pt_data[None, None, :])
 
-        print('Comparing librosa and pytorch implementation of stft. All numbers '
+        print('Comparing librosa and pytorch implementation of STFT. All numbers '
             'below should be close to 0.')
 
         print(np.max(np.abs(np.real(np_stft_matrix) - pt_stft_real.data.cpu().numpy()[0, 0])))
@@ -797,29 +798,28 @@ def debug(select, device):
         print(np.max(np.abs(np_data - pt_istft_s2.data.cpu().numpy())))
 
     elif select == 'logmel':
-
-        data_length = 4*32000
         norm = None     # None | 'ortho'
         device = torch.device(device)
         np.random.seed(0)
 
         # Spectrogram parameters
-        sample_rate = 32000
-        n_fft = 1024
-        hop_length = 320
-        win_length = 1024
+        sample_rate = 22050
+        data_length = sample_rate * 1
+        n_fft = 2048
+        hop_length = 512
+        win_length = 2048
         window = 'hann'
         center = True
         dtype = np.complex64
         pad_mode = 'reflect'
 
-        # Mel parameters
+        # Mel parameters (the same as librosa.feature.melspectrogram)
         n_mels = 128
-        fmin = 50
-        fmax = 14000
+        fmin = 0.
+        fmax = sample_rate / 2.0
         ref = 1.0
         amin = 1e-10
-        top_db = None
+        top_db = 80.0
 
         # Data
         np_data = np.random.uniform(-1, 1, data_length)
@@ -879,13 +879,14 @@ def debug(select, device):
         print(np.max(np.abs(np_logmel_spectrogram - pt_logmel_spectrogram[0, 0].data.cpu().numpy())))
 
     elif select == 'enframe':
-        data_length = 32000
         device = torch.device(device)
         np.random.seed(0)
 
         # Spectrogram parameters
-        hop_length = 250
-        win_length = 1024
+        sample_rate = 22050
+        data_length = sample_rate * 1
+        hop_length = 512
+        win_length = 2048
         
         # Data
         np_data = np.random.uniform(-1, 1, data_length)
@@ -990,43 +991,89 @@ def debug(select, device):
         pt_IV = intensityvector((pt_stft_real, pt_stft_imag), pt_logmel_extractor.melW)
         print(np.max(np.abs(np_IV - pt_IV.cpu().detach().numpy())))
 
+    elif select == 'default':
+        device = torch.device(device)
+        np.random.seed(0)
+
+        # Spectrogram parameters (the same as librosa.stft)
+        sample_rate = 22050
+        data_length = sample_rate * 1
+        hop_length = 512
+        win_length = 2048
+
+        # Mel parameters (the same as librosa.feature.melspectrogram)
+        n_mels = 128
+
+        # Data
+        np_data = np.random.uniform(-1, 1, data_length)
+        pt_data = torch.Tensor(np_data).to(device)
+        feature_extractor = nn.Sequential(
+            Spectrogram(
+                hop_length=hop_length,
+                win_length=win_length,
+            ), LogmelFilterBank(
+                sr=sample_rate,
+                n_mels=n_mels,
+                is_log=False, #Default is true
+            ))
+        feature_extractor.to(device)
+
+        print(
+            'Comparing default mel spectrogram from librosa to the pytorch implementation.'
+        )
+
+        # Numpy librosa
+        np_melspect = librosa.feature.melspectrogram(np_data,
+                                                     hop_length=hop_length,
+                                                     sr=sample_rate,
+                                                     win_length=win_length,
+                                                     n_mels=n_mels).T
+        #Pytorch
+        pt_melspect = feature_extractor(pt_data[None, None, :]).squeeze()
+        passed = np.allclose(pt_melspect.data.to('cpu').numpy()[0, 0], np_melspect)
+        print(f"Passed? {passed}")
+
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='')
+    parser.add_argument('--device', type=str, default='cpu', choices=['cpu', 'cuda'])
+    args = parser.parse_args()
 
-    data_length = 32000
+    device = args.device
     norm = None     # None | 'ortho'
-    device = 'cuda' # 'cuda' | 'cpu'
     np.random.seed(0)
 
-    # Spectrogram parameters
-    sample_rate = 32000
-    n_fft = 1024
-    hop_length = 320
-    win_length = 1024
+    # Spectrogram parameters (the same as librosa.stft)
+    sample_rate = 22050
+    data_length = sample_rate * 1
+    n_fft = 2048
+    hop_length = 512
+    win_length = 2048
     window = 'hann'
     center = True
-    dtype = np.complex64
     pad_mode = 'reflect'
 
-    # Mel parameters
+    # Mel parameters (the same as librosa.feature.melspectrogram)
     n_mels = 128
-    fmin = 50
-    fmax = 14000
+    fmin = 0.
+    fmax = sample_rate / 2.0
+
+    # Power to db parameters (the same as default settings of librosa.power_to_db
     ref = 1.0
     amin = 1e-10
-    top_db = None
+    top_db = 80.0
 
     # Data
     np_data = np.random.uniform(-1, 1, data_length)
     pt_data = torch.Tensor(np_data).to(device)
 
     # Pytorch
-    spectrogram_extractor = Spectrogram(n_fft=n_fft, hop_length=hop_length, 
-        win_length=win_length, window=window, center=center, pad_mode=pad_mode, 
+    spectrogram_extractor = Spectrogram(n_fft=n_fft, hop_length=hop_length,
+        win_length=win_length, window=window, center=center, pad_mode=pad_mode,
         freeze_parameters=True)
-    
-    logmel_extractor = LogmelFilterBank(sr=sample_rate, n_fft=n_fft, 
-        n_mels=n_mels, fmin=fmin, fmax=fmax, ref=ref, amin=amin, top_db=top_db, 
+
+    logmel_extractor = LogmelFilterBank(sr=sample_rate, n_fft=n_fft,
+        n_mels=n_mels, fmin=fmin, fmax=fmax, ref=ref, amin=amin, top_db=top_db,
         freeze_parameters=True)
 
     spectrogram_extractor.to(device)
@@ -1037,11 +1084,12 @@ if __name__ == '__main__':
 
     # Log mel spectrogram
     pt_logmel_spectrogram = logmel_extractor.forward(pt_spectrogram)
-    
+
     # Uncomment for debug
     if True:
+        debug(select='default', device=device)
         debug(select='dft', device=device)
         debug(select='stft', device=device)
         debug(select='logmel', device=device)
         debug(select='enframe', device=device)
-        debug(select='logmel&iv', device=device)
+
