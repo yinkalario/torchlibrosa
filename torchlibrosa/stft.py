@@ -1030,7 +1030,7 @@ def debug(select, device):
                                                      n_mels=n_mels).T
         #Pytorch
         pt_melspect = feature_extractor(pt_data[None, None, :]).squeeze()
-        passed = np.allclose(pt_melspect.data.to('cpu').numpy()[0, 0], np_melspect)
+        passed = np.allclose(pt_melspect.data.to('cpu').numpy()[0, 0], np_melspect, rtol=1e-05, atol=1e-06)
         print(f"Passed? {passed}")
 
 
